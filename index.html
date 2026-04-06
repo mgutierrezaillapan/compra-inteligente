@@ -119,11 +119,25 @@ function App() {
           api("/publico/licitaciones.json?fecha=" + date + "&estado=adjudicada&CodigoOrganismo=" + orgCode)
         ))
       ]);
-      mercadoRes.forEach(r => { if (r.status === "fulfilled" && r.value?.Listado) mercado.push(...r.value.Listado); });
-      orgRes.forEach(r => { if (r.status === "fulfilled" && r.value?.Listado) miOrg.push(...r.value.Listado); });
+      let apiErrors = [];
+      mercadoRes.forEach(r => {
+        if (r.status === "fulfilled" && r.value?.Listado) mercado.push(...r.value.Listado);
+        else if (r.status === "rejected") apiErrors.push(r.reason?.message || "error");
+      });
+      orgRes.forEach(r => {
+        if (r.status === "fulfilled" && r.value?.Listado) miOrg.push(...r.value.Listado);
+      });
 
       if (!miOrg.length) {
-        setError("Sin adjudicaciones para " + orgName + " en " + dias + " días. Prueba con más días.");
+        let msg = "Sin adjudicaciones para "" + orgName + "" (código: " + orgCode + ") en " + dias + " días.";
+        if (mercado.length === 0 && apiErrors.length > 0) {
+          msg += " La API no respondió correctamente (" + apiErrors[0] + "). Verifica el ticket o inténtalo más tarde.";
+        } else if (mercado.length === 0) {
+          msg += " Tampoco hay datos de mercado para ese período — puede que la API no tenga adjudicaciones recientes.";
+        } else {
+          msg += " El mercado general tiene " + mercado.length + " licitaciones pero ninguna corresponde a este organismo. Prueba con más días o verifica que el código sea correcto.";
+        }
+        setError(msg);
         setStep("config");
         return;
       }
@@ -141,10 +155,30 @@ function App() {
         if (r.status === "fulfilled" && r.value?.Listado?.[0]) detalles.push(r.value.Listado[0]);
       });
 
-      // Comparación de precios
+      // Helper: monto real de una licitación (adjudicado > estimado > total)
+      const montoReal = (l, items) => {
+        if (items && items.length) {
+          const adj = items.reduce((sum, item) => {
+            const a = item.Adjudicacion;
+            if (!a) return sum;
+            return sum + (parseFloat(a.MontoUnitario) || 0) * Math.max(1, parseFloat(a.CantidadAdjudicada) || 1);
+          }, 0);
+          if (adj > 0) return adj;
+        }
+        return parseFloat(l.MontoEstimado) || parseFloat(l.MontoTotal) || parseFloat(l.Monto) || 0;
+      };
+
+      // Índice de detalles por código
+      const detalleByCode = {};
+      detalles.forEach(d => {
+        const cod = d.CodigoExterno || d.Codigo;
+        if (cod) detalleByCode[cod] = d;
+      });
+
+      // Comparación de precios — usa montos reales del mercado
       const mercadoByName = {};
       mercado.forEach(l => {
-        const m = parseFloat(l.MontoEstimado) || 0;
+        const m = parseFloat(l.MontoEstimado) || parseFloat(l.MontoTotal) || parseFloat(l.Monto) || 0;
         if (m <= 0) return;
         const n = (l.Nombre || "").toUpperCase().trim();
         if (!n) return;
@@ -153,9 +187,12 @@ function App() {
       });
 
       const comparaciones = miOrg.map(l => {
-        const monto = parseFloat(l.MontoEstimado) || 0;
-        const nombre = (l.Nombre || "").toUpperCase().trim();
-        const palabras = nombre.split(/\s+/).filter(p => p.length > 3).slice(0, 3);
+        const cod = l.CodigoExterno;
+        const det = detalleByCode[cod];
+        const items = det?.Items?.Listado || [];
+        const monto = montoReal(l, items);
+        const nombre = (det?.Nombre || l.Nombre || "").toUpperCase().trim();
+        const palabras = nombre.split(/\s+/).filter(p => p.length > 3).slice(0, 4);
         let similares = [];
         Object.keys(mercadoByName).forEach(key => {
           let hits = 0;
@@ -168,7 +205,7 @@ function App() {
         const med = median(similares);
         const desv = monto > 0 && prom > 0 ? ((monto - prom) / prom * 100) : null;
         return {
-          codigo: l.CodigoExterno, nombre: l.Nombre, tipo: l.Tipo,
+          codigo: cod, nombre: det?.Nombre || l.Nombre, tipo: l.Tipo,
           monto, promMercado: Math.round(prom), medMercado: Math.round(med),
           refs: similares.length, desv: desv !== null ? Math.round(desv * 10) / 10 : null,
           estado: desv === null ? "sin_ref" : Math.abs(desv) <= 20 ? "ok" : desv > 20 ? "sobre" : "bajo"
@@ -289,8 +326,24 @@ function App() {
         React.createElement("button", {onClick:runAnalysis,style:{...btnS(true),padding:"12px 32px",fontSize:16}}, "Analizar compras vs mercado")
       ),
 
-      error && React.createElement("div", {style:{...crd,borderColor:C.red+"44",background:C.red+"08"}},
-        React.createElement("p", {style:{margin:0,fontSize:13,color:C.red}}, error)
+      error && React.createElement("div", {style:{...crd,borderColor:C.red+"44",background:C.red+"08",display:"flex",flexDirection:"column",gap:8}},
+        React.createElement("p", {style:{margin:0,fontSize:13,color:C.red}}, error),
+        React.createElement("button", {
+          onClick: async () => {
+            setError(null);
+            setProgress("Probando API...");
+            try {
+              const today = fmtDate(new Date());
+              const r = await api("/publico/licitaciones.json?fecha=" + today + "&estado=adjudicada");
+              const count = r?.Listado?.length ?? 0;
+              setError("Diagnóstico OK — La API responde. Licitaciones hoy (" + today + "): " + count + ". Si es 0, prueba con más días o intenta mañana.");
+            } catch(e) {
+              setError("Diagnóstico FALLO — La API no responde: " + e.message + ". Verifica el ticket o el proxy.");
+            }
+            setProgress("");
+          },
+          style:{...btnS(true),fontSize:12,padding:"6px 14px",alignSelf:"flex-start"}
+        }, "Probar API")
       )
     ),
 
@@ -338,14 +391,16 @@ function App() {
               React.createElement("tr", {style:{borderBottom:"1px solid "+C.border,color:C.muted,textAlign:"left",fontSize:11}},
                 React.createElement("th", {style:{padding:"6px 8px"}}, "Código"),
                 React.createElement("th", {style:{padding:"6px 8px"}}, "Licitación"),
-                React.createElement("th", {style:{padding:"6px 8px",textAlign:"right"}}, "Tu monto"),
+                React.createElement("th", {style:{padding:"6px 8px",textAlign:"right"}}, "Monto adj."),
                 React.createElement("th", {style:{padding:"6px 8px",textAlign:"right"}}, "Prom. mercado"),
+                React.createElement("th", {style:{padding:"6px 8px",textAlign:"right"}}, "Mediana"),
+                React.createElement("th", {style:{padding:"6px 8px",textAlign:"right"}}, "Refs."),
                 React.createElement("th", {style:{padding:"6px 8px",textAlign:"right"}}, "Desv.")
               )
             ),
             React.createElement("tbody", null,
               data.comparaciones.map((c, i) =>
-                React.createElement("tr", {key:i,style:{borderBottom:"1px solid "+C.border+"15"}},
+                React.createElement("tr", {key:i,style:{borderBottom:"1px solid "+C.border+"15",background:i%2===0?"transparent":C.surface+"40"}},
                   React.createElement("td", {style:{padding:8,fontFamily:"monospace",fontSize:11,whiteSpace:"nowrap"}},
                     c.codigo
                       ? React.createElement("a", {
@@ -355,9 +410,11 @@ function App() {
                         }, c.codigo)
                       : "—"
                   ),
-                  React.createElement("td", {style:{padding:8,maxWidth:180,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}, c.nombre || "—"),
-                  React.createElement("td", {style:{padding:8,textAlign:"right",fontFamily:"monospace"}}, fmt(c.monto)),
-                  React.createElement("td", {style:{padding:8,textAlign:"right",fontFamily:"monospace",color:C.dim}}, c.refs > 0 ? fmt(c.promMercado) : "Sin ref."),
+                  React.createElement("td", {style:{padding:8,maxWidth:200,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",title:c.nombre||""}}, c.nombre || "—"),
+                  React.createElement("td", {style:{padding:8,textAlign:"right",fontFamily:"monospace",color:c.monto>0?C.text:C.muted}}, c.monto > 0 ? fmt(c.monto) : "Sin monto"),
+                  React.createElement("td", {style:{padding:8,textAlign:"right",fontFamily:"monospace",color:C.dim}}, c.refs > 0 ? fmt(c.promMercado) : "—"),
+                  React.createElement("td", {style:{padding:8,textAlign:"right",fontFamily:"monospace",color:C.dim}}, c.refs > 0 ? fmt(c.medMercado) : "—"),
+                  React.createElement("td", {style:{padding:8,textAlign:"right",color:C.muted,fontSize:11}}, c.refs > 0 ? c.refs : "—"),
                   React.createElement("td", {style:{padding:8,textAlign:"right"}}, React.createElement(DesvIcon, {estado:c.estado,desv:c.desv}))
                 )
               )
