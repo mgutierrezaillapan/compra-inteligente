@@ -129,7 +129,7 @@ function App() {
       });
 
       if (!miOrg.length) {
-        let msg = "Sin adjudicaciones para "" + orgName + "" (código: " + orgCode + ") en " + dias + " días.";
+        let msg = "Sin adjudicaciones para \"" + orgName + "\" (código: " + orgCode + ") en " + dias + " días.";
         if (mercado.length === 0 && apiErrors.length > 0) {
           msg += " La API no respondió correctamente (" + apiErrors[0] + "). Verifica el ticket o inténtalo más tarde.";
         } else if (mercado.length === 0) {
