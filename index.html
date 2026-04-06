@@ -76,23 +76,23 @@ function App() {
     setOrgList([]);
     setProgress("Buscando organismos...");
     try {
-      const resp = await api("/Publico/Empresas/BuscarComprador");
+      const resp = await api("/Publico/Empresas/BuscarComprador?nombre=" + encodeURIComponent(orgSearch.trim()));
       let list = [];
       if (Array.isArray(resp)) { list = resp; }
       else if (resp) {
         for (const k of Object.keys(resp)) {
-          if (Array.isArray(resp[k]) && resp[k].length > 5) { list = resp[k]; break; }
+          if (Array.isArray(resp[k]) && resp[k].length > 0) { list = resp[k]; break; }
         }
       }
       const kw = orgSearch.toLowerCase();
       const filtered = list.filter(o => {
         const name = (o.NombreEmpresa || o.Nombre || o.nombre || "").toLowerCase();
         return name.includes(kw);
-      }).slice(0, 15);
+      }).slice(0, 20);
       setOrgList(filtered);
-      if (!filtered.length) setError("Sin resultados. Intenta otra palabra.");
+      if (!filtered.length) setError("Sin resultados. Intenta otra palabra clave.");
     } catch (e) {
-      setError("Error: " + e.message);
+      setError("Error buscando organismos: " + e.message);
     }
     setProgress("");
   };
@@ -108,17 +108,19 @@ function App() {
 
     try {
       let mercado = [], miOrg = [];
-      for (let i = 0; i < dates.length; i++) {
-        setProgress("Día " + (i+1) + "/" + dates.length + "...");
-        try {
-          const all = await api("/publico/licitaciones.json?fecha=" + dates[i] + "&estado=adjudicada");
-          if (all && all.Listado) mercado.push(...all.Listado);
-        } catch(e) {}
-        try {
-          const org = await api("/publico/licitaciones.json?fecha=" + dates[i] + "&estado=adjudicada&CodigoOrganismo=" + orgCode);
-          if (org && org.Listado) miOrg.push(...org.Listado);
-        } catch(e) {}
-      }
+
+      // Peticiones en paralelo por cada día
+      setProgress("Obteniendo licitaciones (" + dates.length + " días en paralelo)...");
+      const [mercadoRes, orgRes] = await Promise.all([
+        Promise.allSettled(dates.map(date =>
+          api("/publico/licitaciones.json?fecha=" + date + "&estado=adjudicada")
+        )),
+        Promise.allSettled(dates.map(date =>
+          api("/publico/licitaciones.json?fecha=" + date + "&estado=adjudicada&CodigoOrganismo=" + orgCode)
+        ))
+      ]);
+      mercadoRes.forEach(r => { if (r.status === "fulfilled" && r.value?.Listado) mercado.push(...r.value.Listado); });
+      orgRes.forEach(r => { if (r.status === "fulfilled" && r.value?.Listado) miOrg.push(...r.value.Listado); });
 
       if (!miOrg.length) {
         setError("Sin adjudicaciones para " + orgName + " en " + dias + " días. Prueba con más días.");
@@ -126,18 +128,18 @@ function App() {
         return;
       }
 
-      // Detalle del organismo
+      // Detalle del organismo — también en paralelo
       const maxDet = Math.min(miOrg.length, 30);
       const detalles = [];
-      for (let i = 0; i < maxDet; i++) {
-        const cod = miOrg[i].CodigoExterno;
-        if (!cod) continue;
-        setProgress("Detalle " + (i+1) + "/" + maxDet + "...");
-        try {
-          const d = await api("/publico/licitaciones.json?codigo=" + cod);
-          if (d && d.Listado && d.Listado[0]) detalles.push(d.Listado[0]);
-        } catch(e) {}
-      }
+      setProgress("Cargando detalle de " + maxDet + " licitaciones en paralelo...");
+      const detRes = await Promise.allSettled(
+        miOrg.slice(0, maxDet)
+          .filter(l => l.CodigoExterno)
+          .map(l => api("/publico/licitaciones.json?codigo=" + l.CodigoExterno))
+      );
+      detRes.forEach(r => {
+        if (r.status === "fulfilled" && r.value?.Listado?.[0]) detalles.push(r.value.Listado[0]);
+      });
 
       // Comparación de precios
       const mercadoByName = {};
@@ -344,7 +346,15 @@ function App() {
             React.createElement("tbody", null,
               data.comparaciones.map((c, i) =>
                 React.createElement("tr", {key:i,style:{borderBottom:"1px solid "+C.border+"15"}},
-                  React.createElement("td", {style:{padding:8,fontFamily:"monospace",fontSize:11,color:C.accent,whiteSpace:"nowrap"}}, c.codigo || "—"),
+                  React.createElement("td", {style:{padding:8,fontFamily:"monospace",fontSize:11,whiteSpace:"nowrap"}},
+                    c.codigo
+                      ? React.createElement("a", {
+                          href: "https://www.mercadopublico.cl/Procurement/Modules/RFB/DetailsAcquisition.aspx?idlicitacion=" + c.codigo,
+                          target: "_blank", rel: "noopener noreferrer",
+                          style: {color:C.accent, textDecoration:"none", borderBottom:"1px dashed "+C.accent+"60"}
+                        }, c.codigo)
+                      : "—"
+                  ),
                   React.createElement("td", {style:{padding:8,maxWidth:180,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}, c.nombre || "—"),
                   React.createElement("td", {style:{padding:8,textAlign:"right",fontFamily:"monospace"}}, fmt(c.monto)),
                   React.createElement("td", {style:{padding:8,textAlign:"right",fontFamily:"monospace",color:C.dim}}, c.refs > 0 ? fmt(c.promMercado) : "Sin ref."),
