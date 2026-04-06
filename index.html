@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CompraInteligente</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=Overpass:wght@400;600;800&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0a0f1a;color:#e0e7ef;font-family:'Overpass',system-ui,sans-serif}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useCallback } = React;
+
+const PROXY = "https://compra-inteligente-proxy.marcosgutierrezaillapan.workers.dev";
+const DEFAULT_TICKET = "6B53713B-BE8E-4C1D-A809-848C52DC8094";
+
+const fmt = (n) => n > 0 ? "$" + Math.round(n).toLocaleString("es-CL") : "—";
+const pct = (n) => (n * 100).toFixed(1) + "%";
+const fmtDate = (d) => {
+  const dd = String(d.getDate()).padStart(2,"0");
+  const mm = String(d.getMonth()+1).padStart(2,"0");
+  return dd + mm + d.getFullYear();
+};
+const getDates = (n) => {
+  const r = [];
+  for (let i = 0; i < n; i++) {
+    const d = new Date();
+    d.setDate(d.getDate() - i);
+    r.push(fmtDate(d));
+  }
+  return r;
+};
+const median = (a) => {
+  if (!a.length) return 0;
+  const s = [...a].sort((x,y) => x - y);
+  const m = Math.floor(s.length / 2);
+  return s.length % 2 ? s[m] : (s[m-1] + s[m]) / 2;
+};
+
+const C = {
+  bg:"#0a0f1a", surface:"#101828", card:"#182030", cardAlt:"#1c2640",
+  border:"#263354", accent:"#38bdf8", accentDark:"#0c74a8",
+  red:"#f87171", amber:"#fbbf24", green:"#34d399",
+  text:"#e0e7ef", dim:"#8896b3", muted:"#5a6a8a"
+};
+
+function App() {
+  const [step, setStep] = useState("config");
+  const [ticket, setTicket] = useState(DEFAULT_TICKET);
+  const [dias, setDias] = useState(7);
+  const [orgSearch, setOrgSearch] = useState("");
+  const [orgList, setOrgList] = useState([]);
+  const [orgSelected, setOrgSelected] = useState(null);
+  const [progress, setProgress] = useState("");
+  const [error, setError] = useState(null);
+  const [data, setData] = useState(null);
+
+  const api = useCallback(async (path) => {
+    const sep = path.includes("?") ? "&" : "?";
+    const url = PROXY + path + sep + "ticket=" + ticket;
+    const r = await fetch(url);
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    return r.json();
+  }, [ticket]);
+
+  const searchOrgs = async () => {
+    if (!orgSearch.trim()) return;
+    setError(null);
+    setOrgList([]);
+    setProgress("Buscando organismos...");
+    try {
+      const resp = await api("/Publico/Empresas/BuscarComprador");
+      let list = [];
+      if (Array.isArray(resp)) { list = resp; }
+      else if (resp) {
+        for (const k of Object.keys(resp)) {
+          if (Array.isArray(resp[k]) && resp[k].length > 5) { list = resp[k]; break; }
+        }
+      }
+      const kw = orgSearch.toLowerCase();
+      const filtered = list.filter(o => {
+        const name = (o.NombreEmpresa || o.Nombre || o.nombre || "").toLowerCase();
+        return name.includes(kw);
+      }).slice(0, 15);
+      setOrgList(filtered);
+      if (!filtered.length) setError("Sin resultados. Intenta otra palabra.");
+    } catch (e) {
+      setError("Error: " + e.message);
+    }
+    setProgress("");
+  };
+
+  const runAnalysis = async () => {
+    if (!orgSelected) return;
+    setStep("loading");
+    setError(null);
+    setData(null);
+    const orgCode = orgSelected.CodigoEmpresa || orgSelected.Codigo || orgSelected.codigo;
+    const orgName = orgSelected.NombreEmpresa || orgSelected.Nombre || orgSelected.nombre;
+    const dates = getDates(dias);
+
+    try {
+      let mercado = [], miOrg = [];
+      for (let i = 0; i < dates.length; i++) {
+        setProgress("Día " + (i+1) + "/" + dates.length + "...");
+        try {
+          const all = await api("/publico/licitaciones.json?fecha=" + dates[i] + "&estado=adjudicada");
+          if (all && all.Listado) mercado.push(...all.Listado);
+        } catch(e) {}
+        try {
+          const org = await api("/publico/licitaciones.json?fecha=" + dates[i] + "&estado=adjudicada&CodigoOrganismo=" + orgCode);
+          if (org && org.Listado) miOrg.push(...org.Listado);
+        } catch(e) {}
+      }
+
+      if (!miOrg.length) {
+        setError("Sin adjudicaciones para " + orgName + " en " + dias + " días. Prueba con más días.");
+        setStep("config");
+        return;
+      }
+
+      // Detalle del organismo
+      const maxDet = Math.min(miOrg.length, 30);
+      const detalles = [];
+      for (let i = 0; i < maxDet; i++) {
+        const cod = miOrg[i].CodigoExterno;
+        if (!cod) continue;
+        setProgress("Detalle " + (i+1) + "/" + maxDet + "...");
+        try {
+          const d = await api("/publico/licitaciones.json?codigo=" + cod);
+          if (d && d.Listado && d.Listado[0]) detalles.push(d.Listado[0]);
+        } catch(e) {}
+      }
+
+      // Comparación de precios
+      const mercadoByName = {};
+      mercado.forEach(l => {
+        const m = parseFloat(l.MontoEstimado) || 0;
+        if (m <= 0) return;
+        const n = (l.Nombre || "").toUpperCase().trim();
+        if (!n) return;
+        if (!mercadoByName[n]) mercadoByName[n] = [];
+        mercadoByName[n].push(m);
+      });
+
+      const comparaciones = miOrg.map(l => {
+        const monto = parseFloat(l.MontoEstimado) || 0;
+        const nombre = (l.Nombre || "").toUpperCase().trim();
+        const palabras = nombre.split(/\s+/).filter(p => p.length > 3).slice(0, 3);
+        let similares = [];
+        Object.keys(mercadoByName).forEach(key => {
+          let hits = 0;
+          palabras.forEach(p => { if (key.includes(p)) hits++; });
+          if (hits >= 2 || (palabras.length <= 1 && hits >= 1)) {
+            similares.push(...mercadoByName[key]);
+          }
+        });
+        const prom = similares.length ? similares.reduce((a,b) => a+b, 0) / similares.length : 0;
+        const med = median(similares);
+        const desv = monto > 0 && prom > 0 ? ((monto - prom) / prom * 100) : null;
+        return {
+          codigo: l.CodigoExterno, nombre: l.Nombre, tipo: l.Tipo,
+          monto, promMercado: Math.round(prom), medMercado: Math.round(med),
+          refs: similares.length, desv: desv !== null ? Math.round(desv * 10) / 10 : null,
+          estado: desv === null ? "sin_ref" : Math.abs(desv) <= 20 ? "ok" : desv > 20 ? "sobre" : "bajo"
+        };
+      });
+
+      // Concentración
+      const provC = {};
+      let totalItems = 0;
+      detalles.forEach(det => {
+        (det.Items && det.Items.Listado ? det.Items.Listado : []).forEach(item => {
+          const adj = item.Adjudicacion;
+          if (!adj || !adj.NombreProveedor) return;
+          const p = adj.NombreProveedor;
+          if (!provC[p]) provC[p] = { count: 0, monto: 0, rut: adj.RutProveedor || "" };
+          provC[p].count++;
+          provC[p].monto += (parseFloat(adj.MontoUnitario) || 0) * Math.max(1, parseFloat(adj.CantidadAdjudicada) || 1);
+          totalItems++;
+        });
+      });
+
+      const banderas = Object.entries(provC)
+        .map(([prov, d]) => ({
+          proveedor: prov, rut: d.rut, items: d.count, total: totalItems,
+          conc: totalItems > 0 ? d.count / totalItems : 0,
+          monto: d.monto,
+          nivel: d.count/totalItems >= 0.7 ? "ALTO" : d.count/totalItems >= 0.5 ? "MEDIO" : d.count/totalItems >= 0.3 ? "MODERADO" : "BAJO"
+        }))
+        .filter(b => b.conc >= 0.15 && b.items >= 2)
+        .sort((a, b) => b.conc - a.conc);
+
+      setData({
+        orgName, orgCode, totalMercado: mercado.length, totalOrg: miOrg.length,
+        comparaciones, banderas,
+        sobrePrecio: comparaciones.filter(c => c.estado === "sobre").length,
+        conRef: comparaciones.filter(c => c.refs > 0).length,
+      });
+      setStep("results");
+    } catch (e) {
+      setError("Error: " + e.message);
+      setStep("config");
+    }
+    setProgress("");
+  };
+
+  const inp = { background:C.surface, border:"1px solid "+C.border, color:C.text, padding:"10px 14px", borderRadius:8, fontSize:14, outline:"none", width:"100%" };
+  const btnS = (on) => ({ background: on ? "linear-gradient(135deg,"+C.accentDark+","+C.accent+")" : C.border, color: on ? C.bg : C.muted, border:"none", padding:"10px 20px", borderRadius:8, fontSize:14, fontWeight:700, cursor: on ? "pointer" : "default" });
+  const crd = { background:C.card, border:"1px solid "+C.border, borderRadius:12, padding:16 };
+
+  const Nivel = ({nivel}) => {
+    const colors = {ALTO:C.red,MEDIO:C.amber,MODERADO:C.accent,BAJO:C.dim};
+    const col = colors[nivel] || C.dim;
+    return React.createElement("span", {style:{background:col+"20",color:col,padding:"2px 8px",borderRadius:4,fontSize:11,fontWeight:700,letterSpacing:1}}, nivel);
+  };
+
+  const DesvIcon = ({estado, desv}) => {
+    const col = estado==="ok"?C.green:estado==="sobre"?C.red:estado==="bajo"?C.amber:C.muted;
+    const icon = estado==="ok"?"✓":estado==="sobre"?"▲":estado==="bajo"?"▼":"—";
+    return React.createElement("span", {style:{color:col,fontWeight:700,fontFamily:"monospace"}}, icon + " " + (desv !== null ? desv+"%" : "—"));
+  };
+
+  return React.createElement("div", {style:{maxWidth:960,margin:"0 auto",padding:"0 16px"}},
+
+    // Header
+    React.createElement("div", {style:{padding:"28px 0 20px",borderBottom:"1px solid "+C.border,marginBottom:20}},
+      React.createElement("h1", {style:{fontSize:24,fontWeight:800,color:C.accent}}, "◈ CompraInteligente"),
+      React.createElement("p", {style:{fontSize:13,color:C.dim,marginTop:4}}, "Compara las compras de tu organismo vs el mercado")
+    ),
+
+    // CONFIG
+    step === "config" && React.createElement("div", null,
+      // Ticket y días
+      React.createElement("div", {style:{...crd,marginBottom:16,background:C.surface}},
+        React.createElement("div", {style:{fontSize:12,color:C.muted,marginBottom:8,fontWeight:600}}, "⚙ Configuración"),
+        React.createElement("div", {style:{display:"flex",gap:8,flexWrap:"wrap",marginBottom:8}},
+          React.createElement("div", {style:{flex:2,minWidth:180}},
+            React.createElement("label", {style:{fontSize:11,color:C.muted}}, "Ticket API"),
+            React.createElement("input", {value:ticket,onChange:e=>setTicket(e.target.value),style:{...inp,fontSize:12,fontFamily:"monospace",marginTop:4}})
+          ),
+          React.createElement("div", {style:{flex:1,minWidth:80}},
+            React.createElement("label", {style:{fontSize:11,color:C.muted}}, "Días atrás"),
+            React.createElement("select", {value:dias,onChange:e=>setDias(Number(e.target.value)),style:{...inp,marginTop:4}},
+              [3,7,14,30].map(d => React.createElement("option", {key:d,value:d}, d))
+            )
+          )
+        )
+      ),
+
+      // Buscar organismo
+      React.createElement("div", {style:{...crd,marginBottom:16}},
+        React.createElement("div", {style:{fontSize:14,fontWeight:700,color:C.accent,marginBottom:12}}, "1. Busca tu organismo"),
+        React.createElement("div", {style:{display:"flex",gap:8}},
+          React.createElement("input", {value:orgSearch,onChange:e=>setOrgSearch(e.target.value),onKeyDown:e=>{if(e.key==="Enter")searchOrgs()},style:{...inp,flex:1},placeholder:'Ej: "conaf", "salud", "municipalidad"'}),
+          React.createElement("button", {onClick:searchOrgs,style:btnS(true)}, "Buscar")
+        ),
+        orgList.length > 0 && React.createElement("div", {style:{marginTop:12}},
+          orgList.map((o, i) => {
+            const name = o.NombreEmpresa || o.Nombre || o.nombre || "?";
+            const code = o.CodigoEmpresa || o.Codigo || o.codigo || "?";
+            const sel = orgSelected && (orgSelected.CodigoEmpresa || orgSelected.Codigo) === code;
+            return React.createElement("div", {key:i,onClick:()=>setOrgSelected(o),style:{
+              padding:"10px 12px",borderRadius:8,marginBottom:4,cursor:"pointer",
+              background:sel?C.accent+"15":C.surface,border:"1px solid "+(sel?C.accent:C.border)
+            }},
+              React.createElement("span", {style:{color:sel?C.accent:C.text,fontSize:13}}, name),
+              React.createElement("span", {style:{float:"right",fontSize:11,color:C.muted,fontFamily:"monospace"}}, code)
+            );
+          })
+        )
+      ),
+
+      // Botón analizar
+      orgSelected && React.createElement("div", {style:{...crd,textAlign:"center",marginBottom:16}},
+        React.createElement("div", {style:{fontSize:13,color:C.dim,marginBottom:8}},
+          "Organismo: ",
+          React.createElement("strong", {style:{color:C.accent}}, orgSelected.NombreEmpresa || orgSelected.Nombre || "?")
+        ),
+        React.createElement("button", {onClick:runAnalysis,style:{...btnS(true),padding:"12px 32px",fontSize:16}}, "Analizar compras vs mercado")
+      ),
+
+      error && React.createElement("div", {style:{...crd,borderColor:C.red+"44",background:C.red+"08"}},
+        React.createElement("p", {style:{margin:0,fontSize:13,color:C.red}}, error)
+      )
+    ),
+
+    // LOADING
+    step === "loading" && React.createElement("div", {style:{...crd,textAlign:"center",padding:40}},
+      React.createElement("div", {style:{fontSize:28,marginBottom:12}}, "◈"),
+      React.createElement("div", {style:{fontSize:16,fontWeight:600,color:C.accent,marginBottom:8}}, "Analizando..."),
+      React.createElement("div", {style:{fontSize:13,color:C.dim}}, progress)
+    ),
+
+    // RESULTS
+    step === "results" && data && React.createElement("div", null,
+      // Header resultado
+      React.createElement("div", {style:{...crd,marginBottom:16,background:"linear-gradient(135deg,"+C.card+","+C.cardAlt+")"}},
+        React.createElement("div", {style:{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8}},
+          React.createElement("div", null,
+            React.createElement("div", {style:{fontSize:18,fontWeight:800,color:C.accent}}, data.orgName),
+            React.createElement("div", {style:{fontSize:12,color:C.muted}}, "Código: " + data.orgCode + " · Últimos " + dias + " días")
+          ),
+          React.createElement("button", {onClick:()=>{setStep("config");setData(null);},style:{...btnS(true),padding:"6px 14px",fontSize:12}}, "← Volver")
+        )
+      ),
+
+      // Cards
+      React.createElement("div", {style:{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(100px,1fr))",gap:10,marginBottom:16}},
+        [{l:"Adjudicaciones",v:data.totalOrg,c:C.accent},{l:"Con referencia",v:data.conRef,c:C.text},{l:"Sobre precio",v:data.sobrePrecio,c:C.red},{l:"Banderas",v:data.banderas.length,c:data.banderas.length?C.amber:C.green},{l:"Mercado",v:data.totalMercado,c:C.muted}].map((s,i) =>
+          React.createElement("div", {key:i,style:{...crd,textAlign:"center",padding:12}},
+            React.createElement("div", {style:{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:1,marginBottom:4}}, s.l),
+            React.createElement("div", {style:{fontSize:20,fontWeight:800,color:s.c}}, s.v)
+          )
+        )
+      ),
+
+      // Tabla comparación
+      React.createElement("div", {style:{...crd,marginBottom:16}},
+        React.createElement("h2", {style:{fontSize:15,fontWeight:700,color:C.dim,marginBottom:12}}, "◎ Tus compras vs mercado"),
+        React.createElement("div", {style:{fontSize:11,color:C.muted,marginBottom:12,display:"flex",gap:12,flexWrap:"wrap"}},
+          React.createElement("span", null, React.createElement("span",{style:{color:C.green}},"✓"), " ±20%"),
+          React.createElement("span", null, React.createElement("span",{style:{color:C.red}},"▲"), " Sobre"),
+          React.createElement("span", null, React.createElement("span",{style:{color:C.amber}},"▼"), " Bajo")
+        ),
+        React.createElement("div", {style:{overflowX:"auto"}},
+          React.createElement("table", {style:{width:"100%",borderCollapse:"collapse",fontSize:12}},
+            React.createElement("thead", null,
+              React.createElement("tr", {style:{borderBottom:"1px solid "+C.border,color:C.muted,textAlign:"left",fontSize:11}},
+                React.createElement("th", {style:{padding:"6px 8px"}}, "Código"),
+                React.createElement("th", {style:{padding:"6px 8px"}}, "Licitación"),
+                React.createElement("th", {style:{padding:"6px 8px",textAlign:"right"}}, "Tu monto"),
+                React.createElement("th", {style:{padding:"6px 8px",textAlign:"right"}}, "Prom. mercado"),
+                React.createElement("th", {style:{padding:"6px 8px",textAlign:"right"}}, "Desv.")
+              )
+            ),
+            React.createElement("tbody", null,
+              data.comparaciones.map((c, i) =>
+                React.createElement("tr", {key:i,style:{borderBottom:"1px solid "+C.border+"15"}},
+                  React.createElement("td", {style:{padding:8,fontFamily:"monospace",fontSize:11,color:C.accent,whiteSpace:"nowrap"}}, c.codigo || "—"),
+                  React.createElement("td", {style:{padding:8,maxWidth:180,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}, c.nombre || "—"),
+                  React.createElement("td", {style:{padding:8,textAlign:"right",fontFamily:"monospace"}}, fmt(c.monto)),
+                  React.createElement("td", {style:{padding:8,textAlign:"right",fontFamily:"monospace",color:C.dim}}, c.refs > 0 ? fmt(c.promMercado) : "Sin ref."),
+                  React.createElement("td", {style:{padding:8,textAlign:"right"}}, React.createElement(DesvIcon, {estado:c.estado,desv:c.desv}))
+                )
+              )
+            )
+          )
+        )
+      ),
+
+      // Banderas
+      React.createElement("div", {style:{...crd,marginBottom:16}},
+        React.createElement("h2", {style:{fontSize:15,fontWeight:700,color:C.dim,marginBottom:12}}, "⚑ Concentración de proveedores"),
+        data.banderas.length === 0
+          ? React.createElement("div", {style:{textAlign:"center",padding:24,color:C.green}},
+              React.createElement("div", {style:{fontSize:24,marginBottom:6}}, "✓"),
+              "Sin concentraciones sospechosas."
+            )
+          : React.createElement("div", {style:{overflowX:"auto"}},
+              React.createElement("table", {style:{width:"100%",borderCollapse:"collapse",fontSize:12}},
+                React.createElement("thead", null,
+                  React.createElement("tr", {style:{borderBottom:"1px solid "+C.border,color:C.muted,textAlign:"left",fontSize:11}},
+                    React.createElement("th", {style:{padding:"6px 8px"}}, "Riesgo"),
+                    React.createElement("th", {style:{padding:"6px 8px"}}, "Proveedor"),
+                    React.createElement("th", {style:{padding:"6px 8px"}}, "Concentración"),
+                    React.createElement("th", {style:{padding:"6px 8px",textAlign:"right"}}, "Ítems"),
+                    React.createElement("th", {style:{padding:"6px 8px",textAlign:"right"}}, "Monto")
+                  )
+                ),
+                React.createElement("tbody", null,
+                  data.banderas.map((b, i) =>
+                    React.createElement("tr", {key:i,style:{borderBottom:"1px solid "+C.border+"15"}},
+                      React.createElement("td", {style:{padding:8}}, React.createElement(Nivel, {nivel:b.nivel})),
+                      React.createElement("td", {style:{padding:8,maxWidth:160,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}, b.proveedor),
+                      React.createElement("td", {style:{padding:8}},
+                        React.createElement("div", {style:{display:"flex",alignItems:"center",gap:6}},
+                          React.createElement("div", {style:{width:70,height:5,background:C.border,borderRadius:3,overflow:"hidden"}},
+                            React.createElement("div", {style:{width:pct(b.conc),height:"100%",background:b.conc>=0.7?C.red:b.conc>=0.5?C.amber:C.accent,borderRadius:3}})
+                          ),
+                          React.createElement("span", {style:{fontSize:11}}, pct(b.conc))
+                        )
+                      ),
+                      React.createElement("td", {style:{padding:8,textAlign:"right",fontFamily:"monospace"}}, b.items+"/"+b.total),
+                      React.createElement("td", {style:{padding:8,textAlign:"right",fontFamily:"monospace",color:C.amber}}, fmt(b.monto))
+                    )
+                  )
+                )
+              )
+            )
+      ),
+
+      // Footer
+      React.createElement("div", {style:{textAlign:"center",padding:"16px 0",fontSize:11,color:C.muted,borderTop:"1px solid "+C.border}},
+        "CompraInteligente — Datos públicos vía api.mercadopublico.cl"
+      )
+    )
+  );
+}
+
+ReactDOM.render(React.createElement(App), document.getElementById("root"));
+</script>
+</body>
+</html>
