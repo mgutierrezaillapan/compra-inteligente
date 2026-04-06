@@ -251,7 +251,7 @@ function App() {
           React.createElement("div", {style:{flex:1,minWidth:80}},
             React.createElement("label", {style:{fontSize:11,color:C.muted}}, "Días atrás"),
             React.createElement("select", {value:dias,onChange:e=>setDias(Number(e.target.value)),style:{...inp,marginTop:4}},
-              [3,7,14,30].map(d => React.createElement("option", {key:d,value:d}, d))
+              [3,7,14,30,60,90,180,365].map(d => React.createElement("option", {key:d,value:d}, d))
             )
           )
         )
