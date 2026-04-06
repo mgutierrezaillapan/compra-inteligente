@@ -155,10 +155,30 @@ function App() {
         if (r.status === "fulfilled" && r.value?.Listado?.[0]) detalles.push(r.value.Listado[0]);
       });
 
-      // Comparación de precios
+      // Helper: monto real de una licitación (adjudicado > estimado > total)
+      const montoReal = (l, items) => {
+        if (items && items.length) {
+          const adj = items.reduce((sum, item) => {
+            const a = item.Adjudicacion;
+            if (!a) return sum;
+            return sum + (parseFloat(a.MontoUnitario) || 0) * Math.max(1, parseFloat(a.CantidadAdjudicada) || 1);
+          }, 0);
+          if (adj > 0) return adj;
+        }
+        return parseFloat(l.MontoEstimado) || parseFloat(l.MontoTotal) || parseFloat(l.Monto) || 0;
+      };
+
+      // Índice de detalles por código
+      const detalleByCode = {};
+      detalles.forEach(d => {
+        const cod = d.CodigoExterno || d.Codigo;
+        if (cod) detalleByCode[cod] = d;
+      });
+
+      // Comparación de precios — usa montos reales del mercado
       const mercadoByName = {};
       mercado.forEach(l => {
-        const m = parseFloat(l.MontoEstimado) || 0;
+        const m = parseFloat(l.MontoEstimado) || parseFloat(l.MontoTotal) || parseFloat(l.Monto) || 0;
         if (m <= 0) return;
         const n = (l.Nombre || "").toUpperCase().trim();
         if (!n) return;
@@ -167,9 +187,12 @@ function App() {
       });
 
       const comparaciones = miOrg.map(l => {
-        const monto = parseFloat(l.MontoEstimado) || 0;
-        const nombre = (l.Nombre || "").toUpperCase().trim();
-        const palabras = nombre.split(/\s+/).filter(p => p.length > 3).slice(0, 3);
+        const cod = l.CodigoExterno;
+        const det = detalleByCode[cod];
+        const items = det?.Items?.Listado || [];
+        const monto = montoReal(l, items);
+        const nombre = (det?.Nombre || l.Nombre || "").toUpperCase().trim();
+        const palabras = nombre.split(/\s+/).filter(p => p.length > 3).slice(0, 4);
         let similares = [];
         Object.keys(mercadoByName).forEach(key => {
           let hits = 0;
@@ -182,7 +205,7 @@ function App() {
         const med = median(similares);
         const desv = monto > 0 && prom > 0 ? ((monto - prom) / prom * 100) : null;
         return {
-          codigo: l.CodigoExterno, nombre: l.Nombre, tipo: l.Tipo,
+          codigo: cod, nombre: det?.Nombre || l.Nombre, tipo: l.Tipo,
           monto, promMercado: Math.round(prom), medMercado: Math.round(med),
           refs: similares.length, desv: desv !== null ? Math.round(desv * 10) / 10 : null,
           estado: desv === null ? "sin_ref" : Math.abs(desv) <= 20 ? "ok" : desv > 20 ? "sobre" : "bajo"
@@ -368,14 +391,16 @@ function App() {
               React.createElement("tr", {style:{borderBottom:"1px solid "+C.border,color:C.muted,textAlign:"left",fontSize:11}},
                 React.createElement("th", {style:{padding:"6px 8px"}}, "Código"),
                 React.createElement("th", {style:{padding:"6px 8px"}}, "Licitación"),
-                React.createElement("th", {style:{padding:"6px 8px",textAlign:"right"}}, "Tu monto"),
+                React.createElement("th", {style:{padding:"6px 8px",textAlign:"right"}}, "Monto adj."),
                 React.createElement("th", {style:{padding:"6px 8px",textAlign:"right"}}, "Prom. mercado"),
+                React.createElement("th", {style:{padding:"6px 8px",textAlign:"right"}}, "Mediana"),
+                React.createElement("th", {style:{padding:"6px 8px",textAlign:"right"}}, "Refs."),
                 React.createElement("th", {style:{padding:"6px 8px",textAlign:"right"}}, "Desv.")
               )
             ),
             React.createElement("tbody", null,
               data.comparaciones.map((c, i) =>
-                React.createElement("tr", {key:i,style:{borderBottom:"1px solid "+C.border+"15"}},
+                React.createElement("tr", {key:i,style:{borderBottom:"1px solid "+C.border+"15",background:i%2===0?"transparent":C.surface+"40"}},
                   React.createElement("td", {style:{padding:8,fontFamily:"monospace",fontSize:11,whiteSpace:"nowrap"}},
                     c.codigo
                       ? React.createElement("a", {
@@ -385,9 +410,11 @@ function App() {
                         }, c.codigo)
                       : "—"
                   ),
-                  React.createElement("td", {style:{padding:8,maxWidth:180,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}, c.nombre || "—"),
-                  React.createElement("td", {style:{padding:8,textAlign:"right",fontFamily:"monospace"}}, fmt(c.monto)),
-                  React.createElement("td", {style:{padding:8,textAlign:"right",fontFamily:"monospace",color:C.dim}}, c.refs > 0 ? fmt(c.promMercado) : "Sin ref."),
+                  React.createElement("td", {style:{padding:8,maxWidth:200,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",title:c.nombre||""}}, c.nombre || "—"),
+                  React.createElement("td", {style:{padding:8,textAlign:"right",fontFamily:"monospace",color:c.monto>0?C.text:C.muted}}, c.monto > 0 ? fmt(c.monto) : "Sin monto"),
+                  React.createElement("td", {style:{padding:8,textAlign:"right",fontFamily:"monospace",color:C.dim}}, c.refs > 0 ? fmt(c.promMercado) : "—"),
+                  React.createElement("td", {style:{padding:8,textAlign:"right",fontFamily:"monospace",color:C.dim}}, c.refs > 0 ? fmt(c.medMercado) : "—"),
+                  React.createElement("td", {style:{padding:8,textAlign:"right",color:C.muted,fontSize:11}}, c.refs > 0 ? c.refs : "—"),
                   React.createElement("td", {style:{padding:8,textAlign:"right"}}, React.createElement(DesvIcon, {estado:c.estado,desv:c.desv}))
                 )
               )
