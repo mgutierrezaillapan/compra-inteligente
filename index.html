@@ -119,11 +119,25 @@ function App() {
           api("/publico/licitaciones.json?fecha=" + date + "&estado=adjudicada&CodigoOrganismo=" + orgCode)
         ))
       ]);
-      mercadoRes.forEach(r => { if (r.status === "fulfilled" && r.value?.Listado) mercado.push(...r.value.Listado); });
-      orgRes.forEach(r => { if (r.status === "fulfilled" && r.value?.Listado) miOrg.push(...r.value.Listado); });
+      let apiErrors = [];
+      mercadoRes.forEach(r => {
+        if (r.status === "fulfilled" && r.value?.Listado) mercado.push(...r.value.Listado);
+        else if (r.status === "rejected") apiErrors.push(r.reason?.message || "error");
+      });
+      orgRes.forEach(r => {
+        if (r.status === "fulfilled" && r.value?.Listado) miOrg.push(...r.value.Listado);
+      });
 
       if (!miOrg.length) {
-        setError("Sin adjudicaciones para " + orgName + " en " + dias + " días. Prueba con más días.");
+        let msg = "Sin adjudicaciones para "" + orgName + "" (código: " + orgCode + ") en " + dias + " días.";
+        if (mercado.length === 0 && apiErrors.length > 0) {
+          msg += " La API no respondió correctamente (" + apiErrors[0] + "). Verifica el ticket o inténtalo más tarde.";
+        } else if (mercado.length === 0) {
+          msg += " Tampoco hay datos de mercado para ese período — puede que la API no tenga adjudicaciones recientes.";
+        } else {
+          msg += " El mercado general tiene " + mercado.length + " licitaciones pero ninguna corresponde a este organismo. Prueba con más días o verifica que el código sea correcto.";
+        }
+        setError(msg);
         setStep("config");
         return;
       }
@@ -289,8 +303,24 @@ function App() {
         React.createElement("button", {onClick:runAnalysis,style:{...btnS(true),padding:"12px 32px",fontSize:16}}, "Analizar compras vs mercado")
       ),
 
-      error && React.createElement("div", {style:{...crd,borderColor:C.red+"44",background:C.red+"08"}},
-        React.createElement("p", {style:{margin:0,fontSize:13,color:C.red}}, error)
+      error && React.createElement("div", {style:{...crd,borderColor:C.red+"44",background:C.red+"08",display:"flex",flexDirection:"column",gap:8}},
+        React.createElement("p", {style:{margin:0,fontSize:13,color:C.red}}, error),
+        React.createElement("button", {
+          onClick: async () => {
+            setError(null);
+            setProgress("Probando API...");
+            try {
+              const today = fmtDate(new Date());
+              const r = await api("/publico/licitaciones.json?fecha=" + today + "&estado=adjudicada");
+              const count = r?.Listado?.length ?? 0;
+              setError("Diagnóstico OK — La API responde. Licitaciones hoy (" + today + "): " + count + ". Si es 0, prueba con más días o intenta mañana.");
+            } catch(e) {
+              setError("Diagnóstico FALLO — La API no responde: " + e.message + ". Verifica el ticket o el proxy.");
+            }
+            setProgress("");
+          },
+          style:{...btnS(true),fontSize:12,padding:"6px 14px",alignSelf:"flex-start"}
+        }, "Probar API")
       )
     ),
 
